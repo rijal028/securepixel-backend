@@ -1,5 +1,7 @@
+import os
 import io
 import cv2
+import urllib.request
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
@@ -7,10 +9,24 @@ from typing import List
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-# Inisialisasi ONNX Runtime Engine (Dynamic Batching aktif)
-session = ort.InferenceSession("model.onnx", providers=["CPUExecutionProvider"])
+# -------------------------------------------------------------
+# 1. AUTO-DOWNLOAD MODEL DARI GITHUB RELEASES JIKA BELUM ADA
+# -------------------------------------------------------------
+MODEL_PATH = "model.onnx"
+MODEL_URL = "https://github.com/rijal028/securepixel-backend/releases/download/v1.0.0/model.onnx"
+
+if not os.path.exists(MODEL_PATH):
+    print(f"[*] Mengunduh model {MODEL_PATH} dari GitHub Releases...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print(f"[+] Download tuntas! Ukuran: {os.path.getsize(MODEL_PATH) / (1024*1024):.2f} MB")
+
+# Inisialisasi ONNX Runtime Engine
+session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
 input_name = session.get_inputs()[0].name
 
+# -------------------------------------------------------------
+# 2. PREPROCESSING & SPECTRAL FFT
+# -------------------------------------------------------------
 def preprocess_image(img_pil: Image.Image) -> np.ndarray:
     img = img_pil.resize((224, 224), Image.Resampling.BILINEAR)
     arr = np.array(img, dtype=np.float32) / 255.0
@@ -104,6 +120,9 @@ def run_forensic_pipeline(pil_img: Image.Image, score_visual: float) -> dict:
         }
     }
 
+# -------------------------------------------------------------
+# 3. FASTAPI ROUTING (SINGLE & BATCH)
+# -------------------------------------------------------------
 app = FastAPI(title="SecurePixel Ultralight ONNX Engine")
 
 app.add_middleware(
@@ -169,7 +188,7 @@ async def predict_batch(files: List[UploadFile] = File(...)):
     if not images:
         return {"verdict": "INCONCLUSIVE", "calibrated_confidence": 0.0, "reason": "No valid frames decoded."}
 
-    # Satukan seluruh frame menjadi 1 Batch Tensor [N, 3, 224, 224]
+    # Dynamic Batch Inference
     batch_tensors = np.stack([preprocess_image(im) for im in images], axis=0)
     batch_outputs = session.run(None, {input_name: batch_tensors})[0]
 
@@ -182,7 +201,6 @@ async def predict_batch(files: List[UploadFile] = File(...)):
         frame_res = run_forensic_pipeline(im, score_visual)
         results.append(frame_res)
 
-    # Agregasi Mayoritas Suara Lintas Frame
     ai_votes = sum(1 for r in results if r.get("verdict") == "LIKELY AI-GENERATED")
     nat_votes = sum(1 for r in results if r.get("verdict") == "LIKELY NATURAL CAPTURE")
     total_valid = len(results)
